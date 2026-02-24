@@ -21,3 +21,8 @@ greentic-qa-lib = { workspace = true }
 assert_cmd = { workspace = true }
 assert_fs = { workspace = true }
 tempfile = { workspace = true }
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
