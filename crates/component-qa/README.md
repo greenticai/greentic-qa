@@ -34,14 +34,36 @@ cargo build
 - `tools/i18n.sh` reads `assets/i18n/locales.json` and generates locale JSON files from `assets/i18n/en.json`.
 - `build.rs` embeds all `assets/i18n/*.json` locale dictionaries into the WASM as a CBOR bundle.
 
+## QA Setup Workflow (Pack Assets)
+
+1. Generate a real form with `greentic-qa new` (or `greentic-qa generate`).
+2. Copy the generated form file into pack assets, for example:
+   - `qa/forms/support.form.json`
+3. Add locale dictionaries for that form under pack assets, for example:
+   - `qa/i18n/en.json`
+   - `qa/i18n/nl.json`
+4. Configure `component-qa` with:
+
+```json
+{
+  "qa_form_asset_path": "qa/forms/support.form.json"
+}
+```
+
+`component-qa` loads the form from assets at runtime (WASI filesystem). If no
+`qa_form_asset_path` is configured, setup fails fast with a guidance error.
+
+When a form question uses `title_i18n` / `description_i18n`, `component-qa`
+resolves defaults from the selected locale and falls back to `en`. On load,
+all referenced i18n keys are validated against `qa/i18n/en.json`.
+
 ## QA Ops Local Test
 
 - `qa-spec`: emit/expect setup-mode DTO semantics (`setup|update|remove`); input accepts `default|setup|install|update|upgrade|remove`.
 - `apply-answers`: invoke with `{ "mode": "setup", "answers": {...}, "current_config": {...} }` (`install` accepted as alias).
 - `i18n-keys`: invoke with `{}` to list keys referenced by QA/setup paths.
 
-## Next Steps
+## Notes
 
-- Implement domain-specific logic inside `src/lib.rs`.
-- Extend `src/qa.rs` and `assets/i18n/en.json` with your real setup flow fields.
-- Wire additional capabilities or telemetry requirements into `component.manifest.json`.
+- `qa_form_asset_path` is the canonical setup hook for real pack deployments.
+- The placeholder fixture is kept for tests only and is no longer used as a runtime default.

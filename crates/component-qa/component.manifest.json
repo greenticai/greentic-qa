@@ -19,16 +19,29 @@
     "wasi": {
       "clocks": true,
       "filesystem": {
-        "mode": "none",
-        "mounts": []
+        "mode": "read_only",
+        "mounts": [
+          {
+            "guest_path": ".",
+            "host_class": "cwd",
+            "name": "workspace"
+          }
+        ]
       },
       "random": true
     }
   },
   "config_schema": {
     "additionalProperties": false,
-    "properties": {},
-    "required": [],
+    "properties": {
+      "qa_form_asset_path": {
+        "description": "Asset path to a greentic-qa generated form JSON (for example qa/forms/support.form.json).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "qa_form_asset_path"
+    ],
     "type": "object"
   },
   "default_operation": "handle_message",

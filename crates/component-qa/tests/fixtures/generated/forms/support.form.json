@@ -1,0 +1,32 @@
+{
+  "id": "support-form",
+  "title": "Support Setup",
+  "version": "1.0.0",
+  "description": "Configure support provider",
+  "progress_policy": {
+    "skip_answered": true,
+    "autofill_defaults": false,
+    "treat_default_as_answered": false
+  },
+  "questions": [
+    {
+      "id": "api_key",
+      "type": "string",
+      "title": "API key",
+      "title_i18n": { "key": "qa.form.support.field.api_key.label" },
+      "description": "Secret key for provider auth",
+      "description_i18n": { "key": "qa.form.support.field.api_key.help" },
+      "required": true,
+      "secret": true
+    },
+    {
+      "id": "enabled",
+      "type": "boolean",
+      "title": "Enable provider",
+      "title_i18n": { "key": "qa.form.support.field.enabled.label" },
+      "description": "Enable after setup",
+      "description_i18n": { "key": "qa.form.support.field.enabled.help" },
+      "required": false
+    }
+  ]
+}

@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
+
 use component_qa::{render_card, render_json_ui, render_text, submit_patch};
 use qa_spec::AnswerSet;
 use serde_json::{Map, Value, json};
+use tempfile::TempDir;
 use thiserror::Error;
 
 pub use qa_spec::i18n::ResolvedI18nMap;
@@ -115,6 +118,7 @@ pub struct WizardDriver {
     answers: Value,
     complete: bool,
     last_ui_json: Option<String>,
+    _asset_dir: TempDir,
 }
 
 impl WizardDriver {
@@ -137,16 +141,18 @@ impl WizardDriver {
         } else {
             Value::Object(Map::new())
         };
+        let (asset_dir, form_asset_path) = materialize_spec_assets(&spec_value)?;
 
         Ok(Self {
             form_id,
             spec_version,
-            config_json: json!({ "form_spec_json": config.spec_json }).to_string(),
+            config_json: json!({ "qa_form_asset_path": form_asset_path }).to_string(),
             ctx_json: build_ctx_json(&config.i18n),
             frontend: config.frontend,
             answers,
             complete: false,
             last_ui_json: None,
+            _asset_dir: asset_dir,
         })
     }
 
@@ -312,6 +318,75 @@ fn normalize_answers(value: Value) -> Value {
         value
     } else {
         Value::Object(Map::new())
+    }
+}
+
+fn materialize_spec_assets(spec_value: &Value) -> Result<(TempDir, String), QaLibError> {
+    let temp_dir = TempDir::new().map_err(|err| QaLibError::Component(err.to_string()))?;
+    let forms_dir = temp_dir.path().join("forms");
+    let i18n_dir = temp_dir.path().join("i18n");
+    std::fs::create_dir_all(&forms_dir).map_err(|err| QaLibError::Component(err.to_string()))?;
+    std::fs::create_dir_all(&i18n_dir).map_err(|err| QaLibError::Component(err.to_string()))?;
+
+    let form_file = forms_dir.join("wizard.form.json");
+    let form_contents = serde_json::to_string_pretty(spec_value)?;
+    std::fs::write(&form_file, form_contents)
+        .map_err(|err| QaLibError::Component(err.to_string()))?;
+
+    let mut en_map = BTreeMap::new();
+    collect_i18n_defaults(spec_value, &mut en_map);
+    let en_file = i18n_dir.join("en.json");
+    let en_contents = serde_json::to_string_pretty(&en_map)?;
+    std::fs::write(en_file, en_contents).map_err(|err| QaLibError::Component(err.to_string()))?;
+
+    Ok((temp_dir, form_file.to_string_lossy().to_string()))
+}
+
+fn collect_i18n_defaults(spec_value: &Value, en_map: &mut BTreeMap<String, String>) {
+    for question in spec_value
+        .get("questions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        collect_question_i18n_defaults(&question, en_map);
+    }
+}
+
+fn collect_question_i18n_defaults(question: &Value, en_map: &mut BTreeMap<String, String>) {
+    if let Some(key) = question
+        .get("title_i18n")
+        .and_then(|value| value.get("key"))
+        .and_then(Value::as_str)
+    {
+        let fallback = question
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or(key)
+            .to_string();
+        en_map.entry(key.to_string()).or_insert(fallback);
+    }
+    if let Some(key) = question
+        .get("description_i18n")
+        .and_then(|value| value.get("key"))
+        .and_then(Value::as_str)
+    {
+        let fallback = question
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(key)
+            .to_string();
+        en_map.entry(key.to_string()).or_insert(fallback);
+    }
+
+    if let Some(fields) = question
+        .get("list")
+        .and_then(|list| list.get("fields"))
+        .and_then(Value::as_array)
+    {
+        for field in fields {
+            collect_question_i18n_defaults(field, en_map);
+        }
     }
 }
 

@@ -1,0 +1,6 @@
+{
+  "qa.form.support.field.api_key.label": "API key",
+  "qa.form.support.field.api_key.help": "Secret key for provider auth",
+  "qa.form.support.field.enabled.label": "Enable provider",
+  "qa.form.support.field.enabled.help": "Enable after setup"
+}

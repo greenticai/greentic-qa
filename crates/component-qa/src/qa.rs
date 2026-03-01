@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use greentic_types::i18n_text::I18nText;
 use greentic_types::schemas::component::v0_6_0::{
@@ -16,12 +17,49 @@ use qa_spec::{
     render_text as qa_render_text, resolve_visibility, validate,
 };
 
-const DEFAULT_SPEC: &str = include_str!("../tests/fixtures/simple_form.json");
+const MISSING_QA_FORM_CONFIG_MESSAGE: &str =
+    "No QA form configured. Create one with `greentic-qa new` and reference its asset path.";
 
 #[derive(Debug, Error)]
 enum ComponentError {
     #[error("failed to parse config/{0}")]
     ConfigParse(#[source] serde_json::Error),
+    #[error("{MISSING_QA_FORM_CONFIG_MESSAGE}")]
+    MissingQaFormAssetPath,
+    #[error("failed to read QA form asset; path='{path}'; details: {source}")]
+    QaFormRead {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse QA form asset '{path}': {source}")]
+    QaFormParse {
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to read i18n locale file '{path}': {source}")]
+    I18nRead {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse i18n locale file '{path}': {source}")]
+    I18nParse {
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("missing i18n baseline file 'en.json' for QA form '{form_path}' under '{i18n_dir}'")]
+    MissingI18nEnglish { form_path: String, i18n_dir: String },
+    #[error(
+        "QA form '{form_path}' references i18n keys missing from '{i18n_en_path}': {missing_keys}"
+    )]
+    MissingI18nKeys {
+        form_path: String,
+        i18n_en_path: String,
+        missing_keys: String,
+    },
     #[error("form '{0}' is not available")]
     FormUnavailable(String),
     #[error("json encode error: {0}")]
@@ -35,45 +73,227 @@ enum ComponentError {
 #[derive(Debug, Deserialize, Serialize, Default)]
 struct ComponentConfig {
     #[serde(default)]
-    form_spec_json: Option<String>,
+    qa_form_asset_path: Option<String>,
     #[serde(default)]
     include_registry: BTreeMap<String, String>,
 }
 
-fn load_form_spec(config_json: &str) -> Result<FormSpec, ComponentError> {
-    let spec_value = load_form_spec_value(config_json)?;
-    serde_json::from_value(spec_value).map_err(ComponentError::ConfigParse)
+#[derive(Debug, Clone)]
+struct LoadedFormValue {
+    spec_value: Value,
+    form_asset_path: String,
 }
 
-fn load_form_spec_value(config_json: &str) -> Result<Value, ComponentError> {
+fn load_form_spec(config_json: &str) -> Result<FormSpec, ComponentError> {
+    let loaded = load_form_spec_value(config_json)?;
+    let spec: FormSpec =
+        serde_json::from_value(loaded.spec_value).map_err(ComponentError::ConfigParse)?;
+    validate_form_i18n_keys(&spec, &loaded.form_asset_path)?;
+    Ok(spec)
+}
+
+fn load_form_spec_value(config_json: &str) -> Result<LoadedFormValue, ComponentError> {
     if config_json.trim().is_empty() {
-        return serde_json::from_str(DEFAULT_SPEC).map_err(ComponentError::ConfigParse);
+        return Err(ComponentError::MissingQaFormAssetPath);
     }
-
     let parsed: Value = serde_json::from_str(config_json).map_err(ComponentError::ConfigParse)?;
-
-    // Compatibility: callers may pass raw FormSpec JSON directly.
-    let (mut spec_value, include_registry_values) = if looks_like_form_spec_json(&parsed) {
-        (parsed.clone(), BTreeMap::new())
-    } else {
-        let config: ComponentConfig =
-            serde_json::from_value(parsed.clone()).map_err(ComponentError::ConfigParse)?;
-        let raw_spec = config
-            .form_spec_json
-            .unwrap_or_else(|| DEFAULT_SPEC.to_string());
-        let spec_value = serde_json::from_str(&raw_spec).map_err(ComponentError::ConfigParse)?;
-        let mut registry = BTreeMap::new();
-        for (form_ref, raw_form) in config.include_registry {
-            let value = serde_json::from_str(&raw_form).map_err(ComponentError::ConfigParse)?;
-            registry.insert(form_ref, value);
-        }
-        (spec_value, registry)
-    };
-
+    let config: ComponentConfig =
+        serde_json::from_value(parsed).map_err(ComponentError::ConfigParse)?;
+    let qa_form_asset_path = config
+        .qa_form_asset_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or(ComponentError::MissingQaFormAssetPath)?;
+    let (raw_spec, resolved_path) = read_qa_form_asset(qa_form_asset_path)?;
+    let mut spec_value: Value =
+        serde_json::from_str(&raw_spec).map_err(|source| ComponentError::QaFormParse {
+            path: resolved_path.clone(),
+            source,
+        })?;
+    let include_registry_values = parse_include_registry(config.include_registry)?;
     if !include_registry_values.is_empty() {
         spec_value = expand_includes_value(&spec_value, &include_registry_values)?;
     }
-    Ok(spec_value)
+    Ok(LoadedFormValue {
+        spec_value,
+        form_asset_path: resolved_path,
+    })
+}
+
+fn parse_include_registry(
+    include_registry: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, Value>, ComponentError> {
+    let mut registry = BTreeMap::new();
+    for (form_ref, raw_form) in include_registry {
+        let value = serde_json::from_str(&raw_form).map_err(ComponentError::ConfigParse)?;
+        registry.insert(form_ref, value);
+    }
+    Ok(registry)
+}
+
+fn qa_asset_base_path() -> String {
+    std::env::var("QA_FORM_ASSET_BASE").unwrap_or_else(|_| "assets".to_string())
+}
+
+fn candidate_form_paths(path: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut push = |candidate: String| {
+        if seen.insert(candidate.clone()) {
+            candidates.push(candidate);
+        }
+    };
+
+    if Path::new(path).is_absolute() {
+        push(path.to_string());
+        return candidates;
+    }
+
+    let base = qa_asset_base_path();
+    push(
+        PathBuf::from(&base)
+            .join(path)
+            .to_string_lossy()
+            .to_string(),
+    );
+    push(path.to_string());
+    push(
+        PathBuf::from("/assets")
+            .join(path)
+            .to_string_lossy()
+            .to_string(),
+    );
+    candidates
+}
+
+fn read_qa_form_asset(path: &str) -> Result<(String, String), ComponentError> {
+    let candidates = candidate_form_paths(path);
+    let mut last_read_error: Option<(String, std::io::Error)> = None;
+
+    for candidate in candidates {
+        match std::fs::read_to_string(&candidate) {
+            Ok(contents) => return Ok((contents, candidate)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                last_read_error = Some((candidate, err))
+            }
+            Err(err) => {
+                return Err(ComponentError::QaFormRead {
+                    path: candidate,
+                    source: err,
+                });
+            }
+        }
+    }
+
+    if let Some((path, source)) = last_read_error {
+        return Err(ComponentError::QaFormRead { path, source });
+    }
+
+    Err(ComponentError::MissingQaFormAssetPath)
+}
+
+fn infer_i18n_dir_from_form_path(form_asset_path: &str) -> String {
+    let form_path = PathBuf::from(form_asset_path);
+    let parts = form_path
+        .iter()
+        .map(|part| part.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    if let Some(forms_pos) = parts.iter().position(|part| part == "forms") {
+        let mut prefix = PathBuf::new();
+        for part in &parts[..forms_pos] {
+            prefix.push(part);
+        }
+        prefix.push("i18n");
+        return prefix.to_string_lossy().to_string();
+    }
+
+    if let Some(parent) = form_path.parent()
+        && parent.file_name().and_then(|name| name.to_str()) == Some("forms")
+    {
+        return parent
+            .parent()
+            .map(|base| base.join("i18n"))
+            .unwrap_or_else(|| PathBuf::from("i18n"))
+            .to_string_lossy()
+            .to_string();
+    }
+
+    form_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("i18n")
+        .to_string_lossy()
+        .to_string()
+}
+
+fn load_locale_map(
+    i18n_dir: &str,
+    locale: &str,
+) -> Result<Option<BTreeMap<String, String>>, ComponentError> {
+    let path = PathBuf::from(i18n_dir).join(format!("{locale}.json"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|source| ComponentError::I18nRead {
+        path: path.to_string_lossy().to_string(),
+        source,
+    })?;
+    let parsed: BTreeMap<String, String> =
+        serde_json::from_str(&raw).map_err(|source| ComponentError::I18nParse {
+            path: path.to_string_lossy().to_string(),
+            source,
+        })?;
+    Ok(Some(parsed))
+}
+
+fn collect_question_i18n_keys(question: &qa_spec::QuestionSpec, keys: &mut BTreeSet<String>) {
+    if let Some(text) = &question.title_i18n {
+        keys.insert(text.key.clone());
+    }
+    if let Some(text) = &question.description_i18n {
+        keys.insert(text.key.clone());
+    }
+    if let Some(list) = &question.list {
+        for field in &list.fields {
+            collect_question_i18n_keys(field, keys);
+        }
+    }
+}
+
+fn validate_form_i18n_keys(spec: &FormSpec, form_asset_path: &str) -> Result<(), ComponentError> {
+    let mut keys = BTreeSet::new();
+    for question in &spec.questions {
+        collect_question_i18n_keys(question, &mut keys);
+    }
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let i18n_dir = infer_i18n_dir_from_form_path(form_asset_path);
+    let en =
+        load_locale_map(&i18n_dir, "en")?.ok_or_else(|| ComponentError::MissingI18nEnglish {
+            form_path: form_asset_path.to_string(),
+            i18n_dir: i18n_dir.clone(),
+        })?;
+
+    let missing = keys
+        .into_iter()
+        .filter(|key| !en.contains_key(key))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(ComponentError::MissingI18nKeys {
+        form_path: form_asset_path.to_string(),
+        i18n_en_path: PathBuf::from(i18n_dir)
+            .join("en.json")
+            .to_string_lossy()
+            .to_string(),
+        missing_keys: missing.join(", "),
+    })
 }
 
 fn expand_includes_value(
@@ -199,13 +419,6 @@ fn parse_runtime_context(ctx_json: &str) -> Value {
         .and_then(Value::as_object)
         .map(|ctx| Value::Object(ctx.clone()))
         .unwrap_or(parsed)
-}
-
-fn looks_like_form_spec_json(value: &Value) -> bool {
-    value.get("id").and_then(Value::as_str).is_some()
-        && value.get("title").and_then(Value::as_str).is_some()
-        && value.get("version").and_then(Value::as_str).is_some()
-        && value.get("questions").and_then(Value::as_array).is_some()
 }
 
 fn combine_prefix(parent: &str, child: Option<&str>) -> String {
@@ -432,8 +645,8 @@ fn render_payload(
     let ctx = parse_runtime_context(ctx_json);
     let answers = parse_answers(answers_json);
     let mut payload = build_render_payload(&spec, &ctx, &answers);
-    let spec_value = load_form_spec_value(config_json)?;
-    apply_i18n_to_payload(&mut payload, &spec_value, &ctx);
+    let loaded = load_form_spec_value(config_json)?;
+    apply_i18n_to_payload(&mut payload, &loaded.spec_value, &ctx);
     Ok(payload)
 }
 
@@ -619,7 +832,7 @@ pub fn render_card(form_id: &str, config_json: &str, ctx_json: &str, answers_jso
             if i18n_debug_enabled(&ctx)
                 && let Ok(spec_value) = load_form_spec_value(config_json)
             {
-                attach_i18n_debug_metadata(&mut card, &payload, &spec_value);
+                attach_i18n_debug_metadata(&mut card, &payload, &spec_value.spec_value);
             }
             card
         }),
@@ -796,14 +1009,14 @@ fn payload_config_json(payload: &Value) -> String {
         return config.to_string();
     }
     let mut config = Map::new();
-    if let Some(form_spec_json) = payload.get("form_spec_json") {
-        config.insert("form_spec_json".to_string(), form_spec_json.clone());
+    if let Some(qa_form_asset_path) = payload.get("qa_form_asset_path") {
+        config.insert("qa_form_asset_path".to_string(), qa_form_asset_path.clone());
     }
     if let Some(include_registry) = payload.get("include_registry") {
         config.insert("include_registry".to_string(), include_registry.clone());
     }
     if config.is_empty() {
-        String::new()
+        "{}".to_string()
     } else {
         Value::Object(config).to_string()
     }
@@ -862,6 +1075,36 @@ fn question_kind(question: &qa_spec::QuestionSpec) -> QuestionKind {
     }
 }
 
+fn normalize_locale_chain(locale: Option<&str>) -> Vec<String> {
+    let Some(raw) = locale else {
+        return vec!["en".to_string()];
+    };
+    let normalized = raw.replace('_', "-");
+    let mut chain = vec![normalized.clone()];
+    if let Some((base, _)) = normalized.split_once('-') {
+        chain.push(base.to_string());
+    }
+    chain.push("en".to_string());
+    chain
+}
+
+fn resolve_pack_i18n_text(
+    form_asset_path: &str,
+    locale: Option<&str>,
+    key: &str,
+    fallback: Option<&str>,
+) -> Option<String> {
+    let i18n_dir = infer_i18n_dir_from_form_path(form_asset_path);
+    for candidate in normalize_locale_chain(locale) {
+        if let Ok(Some(locale_map)) = load_locale_map(&i18n_dir, &candidate)
+            && let Some(value) = locale_map.get(key)
+        {
+            return Some(value.clone());
+        }
+    }
+    fallback.map(str::to_string)
+}
+
 fn component_qa_spec(
     mode: NormalizedMode,
     form_id: &str,
@@ -870,7 +1113,9 @@ fn component_qa_spec(
     answers: &Value,
 ) -> Result<ComponentQaSpec, ComponentError> {
     let spec = ensure_form(form_id, config_json)?;
-    let _ctx = parse_runtime_context(ctx_json);
+    let loaded = load_form_spec_value(config_json)?;
+    let ctx = parse_runtime_context(ctx_json);
+    let locale = ctx.get("locale").and_then(Value::as_str);
     let visibility = resolve_visibility(&spec, answers, VisibilityMode::Visible);
     let (title_key, description_key) = mode_title(mode);
     let questions = spec
@@ -881,7 +1126,17 @@ fn component_qa_spec(
             let label = question
                 .title_i18n
                 .as_ref()
-                .map(|text| I18nText::new(text.key.clone(), Some(question.title.clone())))
+                .map(|text| {
+                    I18nText::new(
+                        text.key.clone(),
+                        resolve_pack_i18n_text(
+                            &loaded.form_asset_path,
+                            locale,
+                            &text.key,
+                            Some(&question.title),
+                        ),
+                    )
+                })
                 .unwrap_or_else(|| {
                     I18nText::new(
                         format!("qa.field.{}.label", question.id),
@@ -889,9 +1144,15 @@ fn component_qa_spec(
                     )
                 });
             let help = match (&question.description_i18n, &question.description) {
-                (Some(text), description) => {
-                    Some(I18nText::new(text.key.clone(), description.clone()))
-                }
+                (Some(text), description) => Some(I18nText::new(
+                    text.key.clone(),
+                    resolve_pack_i18n_text(
+                        &loaded.form_asset_path,
+                        locale,
+                        &text.key,
+                        description.as_deref(),
+                    ),
+                )),
                 (None, Some(description)) => Some(I18nText::new(
                     format!("qa.field.{}.help", question.id),
                     Some(description.clone()),

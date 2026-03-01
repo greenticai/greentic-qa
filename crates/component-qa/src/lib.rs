@@ -198,8 +198,16 @@ fn output_schema() -> SchemaIr {
 #[cfg(target_arch = "wasm32")]
 fn config_schema() -> SchemaIr {
     SchemaIr::Object {
-        properties: BTreeMap::from([("enabled".to_string(), SchemaIr::Bool)]),
-        required: Vec::new(),
+        properties: BTreeMap::from([(
+            "qa_form_asset_path".to_string(),
+            SchemaIr::String {
+                min_len: Some(1),
+                max_len: None,
+                regex: None,
+                format: None,
+            },
+        )]),
+        required: vec!["qa_form_asset_path".to_string()],
         additional: AdditionalProperties::Forbid,
     }
 }
