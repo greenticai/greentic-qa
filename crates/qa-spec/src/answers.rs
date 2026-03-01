@@ -2,6 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_cbor::{to_vec, value::to_value};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Optional metadata paired with an `AnswerSet`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -65,6 +66,8 @@ pub struct ValidationError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
 }
 
 /// Result returned from `validate_answers`.

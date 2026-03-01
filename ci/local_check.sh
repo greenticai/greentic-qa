@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cargo fmt --all -- --check || { echo "cargo fmt --all -- --check failed" >&2; exit 1; }
+tools/i18n.sh all || { echo "tools/i18n.sh all failed" >&2; exit 1; }
 cargo clippy --workspace --all-targets -- -D warnings || { echo "cargo clippy --workspace --all-targets -- -D warnings failed" >&2; exit 1; }
 cargo test --workspace || { echo "cargo test --workspace failed" >&2; exit 1; }
 

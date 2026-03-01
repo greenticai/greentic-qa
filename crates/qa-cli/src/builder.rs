@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::{t, tf};
 use qa_spec::{
     answers_schema::generate as answers_schema,
     examples::generate as example_answers,
@@ -149,7 +150,10 @@ impl std::str::FromStr for CliQuestionType {
             "number" | "float" => Ok(CliQuestionType::Number),
             "enum" | "choice" => Ok(CliQuestionType::Enum),
             "list" => Ok(CliQuestionType::List),
-            _ => Err(format!("unknown question type '{}'", value)),
+            _ => Err(tf(
+                "cli.builder.unknown_question_type",
+                &[("value", value.to_string())],
+            )),
         }
     }
 }
@@ -213,22 +217,25 @@ pub fn build_bundle(input: &GenerationInput) -> Result<GeneratedBundle, String> 
 
 fn validate_input(input: &GenerationInput) -> Result<(), String> {
     if input.dir_name.trim().is_empty() {
-        return Err("dir_name must be provided".into());
+        return Err(t("cli.builder.dir_name_required"));
     }
     if input.form.id.trim().is_empty() {
-        return Err("form.id is required".into());
+        return Err(t("cli.builder.form_id_required"));
     }
     if input.questions.is_empty() {
-        return Err("at least one question must be defined".into());
+        return Err(t("cli.builder.at_least_one_question"));
     }
 
     let mut seen = HashSet::new();
     for question in &input.questions {
         if question.id.trim().is_empty() {
-            return Err("question id cannot be empty".into());
+            return Err(t("cli.builder.question_id_empty"));
         }
         if !seen.insert(question.id.clone()) {
-            return Err(format!("duplicate question id '{}'", question.id));
+            return Err(tf(
+                "cli.builder.duplicate_question_id",
+                &[("id", question.id.clone())],
+            ));
         }
         if matches!(question.kind, CliQuestionType::Enum) {
             let has_choices = question
@@ -237,44 +244,50 @@ fn validate_input(input: &GenerationInput) -> Result<(), String> {
                 .map(|choices| !choices.is_empty())
                 .unwrap_or(false);
             if !has_choices {
-                return Err(format!(
-                    "enum question '{}' must include choices",
-                    question.id
+                return Err(tf(
+                    "cli.builder.enum_question_choices_required",
+                    &[("id", question.id.clone())],
                 ));
             }
         }
 
         if matches!(question.kind, CliQuestionType::List) {
             let list = question.list.as_ref().ok_or_else(|| {
-                format!("list question '{}' must include list metadata", question.id)
+                tf(
+                    "cli.builder.list_question_metadata_required",
+                    &[("id", question.id.clone())],
+                )
             })?;
             if list.fields.is_empty() {
-                return Err(format!(
-                    "list question '{}' must define at least one field",
-                    question.id
+                return Err(tf(
+                    "cli.builder.list_question_fields_required",
+                    &[("id", question.id.clone())],
                 ));
             }
             if let (Some(min), Some(max)) = (list.min_items, list.max_items)
                 && min > max
             {
-                return Err(format!(
-                    "list question '{}' min_items cannot exceed max_items",
-                    question.id
+                return Err(tf(
+                    "cli.builder.list_question_min_gt_max",
+                    &[("id", question.id.clone())],
                 ));
             }
             let mut seen_fields = HashSet::new();
             for field in &list.fields {
                 if field.id.trim().is_empty() {
-                    return Err("list field id cannot be empty".into());
+                    return Err(t("cli.builder.list_field_id_empty"));
                 }
                 if !seen_fields.insert(field.id.clone()) {
-                    return Err(format!(
-                        "duplicate field id '{}' in list question '{}'",
-                        field.id, question.id
+                    return Err(tf(
+                        "cli.builder.duplicate_field_id",
+                        &[
+                            ("field_id", field.id.clone()),
+                            ("question_id", question.id.clone()),
+                        ],
                     ));
                 }
                 if matches!(field.kind, CliQuestionType::List) {
-                    return Err("list fields cannot be lists".into());
+                    return Err(t("cli.builder.list_fields_cannot_be_lists"));
                 }
             }
         }
@@ -283,17 +296,20 @@ fn validate_input(input: &GenerationInput) -> Result<(), String> {
             if let (Some(min), Some(max)) = (constraint.min, constraint.max)
                 && min > max
             {
-                return Err(format!(
-                    "constraint min '{}' cannot exceed max '{}'",
-                    min, max
+                return Err(tf(
+                    "cli.builder.constraint_min_gt_max",
+                    &[("min", min.to_string()), ("max", max.to_string())],
                 ));
             }
             if let (Some(min_len), Some(max_len)) = (constraint.min_len, constraint.max_len)
                 && min_len > max_len
             {
-                return Err(format!(
-                    "constraint min_len '{}' cannot exceed max_len '{}'",
-                    min_len, max_len
+                return Err(tf(
+                    "cli.builder.constraint_min_len_gt_max_len",
+                    &[
+                        ("min_len", min_len.to_string()),
+                        ("max_len", max_len.to_string()),
+                    ],
                 ));
             }
         }
@@ -301,17 +317,26 @@ fn validate_input(input: &GenerationInput) -> Result<(), String> {
 
     for validation in &input.validations {
         if validation.message.trim().is_empty() {
-            return Err("validation message must be provided".into());
+            return Err(t("cli.builder.validation_message_required"));
         }
         if validation.fields.is_empty() {
-            return Err("validation must list at least one field".into());
+            return Err(t("cli.builder.validation_field_required"));
         }
         for field in &validation.fields {
             if !input.questions.iter().any(|question| question.id == *field) {
-                return Err(format!(
-                    "validation '{}' references unknown field '{}'",
-                    validation.id.as_deref().unwrap_or("<unnamed>"),
-                    field
+                return Err(tf(
+                    "cli.builder.validation_unknown_field",
+                    &[
+                        (
+                            "validation",
+                            validation
+                                .id
+                                .as_deref()
+                                .unwrap_or(&t("cli.common.unnamed"))
+                                .to_string(),
+                        ),
+                        ("field", field.to_string()),
+                    ],
                 ));
             }
         }

@@ -1,12 +1,14 @@
 pub mod builder;
 
+mod cli_i18n;
 mod wizard;
 
 use builder::{
     CliQuestionType, FormInput, GeneratedBundle, GenerationInput, ListInput, QuestionInput,
     build_bundle, write_bundle,
 };
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use cli_i18n::{apply_localized_help, init_from_cli_args};
 use greentic_qa_lib::{I18nConfig, ResolvedI18nMap, WizardDriver, WizardFrontend, WizardRunConfig};
 use qa_spec::{
     FormSpec, ValidationResult, expr::Expr, spec::question::Constraint,
@@ -20,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use wizard::{AnswerParseError, PromptContext, Verbosity, WizardPayload, WizardPresenter};
 
+pub(crate) use cli_i18n::{t, tf};
+
 type CliResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Parser)]
@@ -30,6 +34,9 @@ type CliResult<T> = Result<T, Box<dyn std::error::Error>>;
     long_about = "Provides wizard helpers, spec generation, and validation helpers backed by the QA component"
 )]
 struct Cli {
+    /// Locale used for CLI/runtime i18n lookup (e.g. en-US).
+    #[arg(long, global = true, value_name = "LOCALE")]
+    locale: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -60,9 +67,6 @@ enum Command {
         /// Render output mode for the wizard display.
         #[arg(long, value_enum, default_value_t = RenderMode::Text)]
         format: RenderMode,
-        /// Locale used for i18n lookup (e.g. en-US).
-        #[arg(long, value_name = "LOCALE")]
-        locale: Option<String>,
         /// Path to a JSON object map of resolved i18n keys to strings.
         #[arg(long, value_name = "FILE")]
         i18n_resolved: Option<PathBuf>,
@@ -120,7 +124,11 @@ struct WizardCliOptions {
 }
 
 fn main() -> CliResult<()> {
-    let cli = Cli::parse();
+    let raw_args = env::args().collect::<Vec<_>>();
+    init_from_cli_args(&raw_args);
+    let cmd = apply_localized_help(Cli::command());
+    let matches = cmd.get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
     match cli.command {
         Command::Wizard {
             spec,
@@ -128,7 +136,6 @@ fn main() -> CliResult<()> {
             verbose,
             answers_json,
             format,
-            locale,
             i18n_resolved,
             i18n_debug,
         } => run_wizard(WizardCliOptions {
@@ -137,7 +144,7 @@ fn main() -> CliResult<()> {
             verbose,
             answers_json,
             format,
-            locale,
+            locale: cli.locale,
             i18n_resolved,
             i18n_debug,
         }),
@@ -157,18 +164,21 @@ fn main() -> CliResult<()> {
 }
 
 fn run_new(out_dir: Option<PathBuf>, force: bool, verbose: bool) -> CliResult<()> {
-    println!("Interactive QA form generator");
-    let form_id = prompt_non_empty(&mark_required("Form ID (dot-delimited)"), None)?;
-    let title = prompt_non_empty(&mark_required("Form title"), None)?;
-    let version = prompt_non_empty(&mark_required("Form version"), Some("0.1.0"))?;
-    let description = prompt_optional("Description (optional)")?;
-    let summary = prompt_optional("Summary for README (optional)")?;
-    let dir_name = prompt_non_empty(&mark_required("Output directory name"), Some(&form_id))?;
+    println!("{}", t("cli.new.banner"));
+    let form_id = prompt_non_empty(&mark_required(&t("cli.prompt.form_id")), None)?;
+    let title = prompt_non_empty(&mark_required(&t("cli.prompt.form_title")), None)?;
+    let version = prompt_non_empty(&mark_required(&t("cli.prompt.form_version")), Some("0.1.0"))?;
+    let description = prompt_optional(&t("cli.prompt.form_description"))?;
+    let summary = prompt_optional(&t("cli.prompt.form_summary"))?;
+    let dir_name = prompt_non_empty(
+        &mark_required(&t("cli.prompt.output_directory_name")),
+        Some(&form_id),
+    )?;
     let out_root = resolve_output_root(out_dir)?;
 
     let mut questions = Vec::new();
     loop {
-        let question_id = prompt_optional("Question ID (blank to finish)")?;
+        let question_id = prompt_optional(&t("cli.prompt.question_id"))?;
         let question_id = match question_id.filter(|value| !value.trim().is_empty()) {
             Some(id) => {
                 if questions
@@ -176,8 +186,8 @@ fn run_new(out_dir: Option<PathBuf>, force: bool, verbose: bool) -> CliResult<()
                     .any(|question: &QuestionInput| question.id == id)
                 {
                     println!(
-                        "Question ID '{}' already used; choose a different identifier.",
-                        id
+                        "{}",
+                        tf("cli.new.question_id_duplicate", &[("id", id.to_string())])
                     );
                     continue;
                 }
@@ -186,11 +196,13 @@ fn run_new(out_dir: Option<PathBuf>, force: bool, verbose: bool) -> CliResult<()
             None => break,
         };
 
-        let question_title =
-            prompt_non_empty(&mark_required("Question title"), Some(&question_id))?;
+        let question_title = prompt_non_empty(
+            &mark_required(&t("cli.prompt.question_title")),
+            Some(&question_id),
+        )?;
         let kind = prompt_question_type()?;
-        let required = prompt_bool("Required?", true)?;
-        let question_description = prompt_optional("Question description (optional)")?;
+        let required = prompt_bool(&t("cli.prompt.required"), true)?;
+        let question_description = prompt_optional(&t("cli.prompt.question_description"))?;
         let choices = if matches!(kind, CliQuestionType::Enum) {
             Some(prompt_enum_choices()?)
         } else {
@@ -204,16 +216,23 @@ fn run_new(out_dir: Option<PathBuf>, force: bool, verbose: bool) -> CliResult<()
             {
                 let hint = describe_type_hint(kind, choices.as_deref(), None);
                 println!(
-                    "Invalid default: {} Expected {} (e.g., {}). Please try again.",
-                    err, hint.expected, hint.example
+                    "{}",
+                    tf(
+                        "cli.new.invalid_default",
+                        &[
+                            ("error", err),
+                            ("expected", hint.expected),
+                            ("example", hint.example),
+                        ]
+                    )
                 );
                 continue;
             }
             break candidate;
         };
-        let advanced_features = prompt_bool("Advanced features?", false)?;
+        let advanced_features = prompt_bool(&t("cli.prompt.advanced_features"), false)?;
         let secret = if advanced_features {
-            prompt_bool("Secret value?", false)?
+            prompt_bool(&t("cli.prompt.secret_value"), false)?
         } else {
             false
         };
@@ -254,8 +273,15 @@ fn run_new(out_dir: Option<PathBuf>, force: bool, verbose: bool) -> CliResult<()
             let list_fields = question.list.as_ref().map(|list| list.fields.as_slice());
             let hint = describe_type_hint(question.kind, question.choices.as_deref(), list_fields);
             println!(
-                "Invalid question: {} Expected {} (e.g., {}). Let's try again.",
-                err, hint.expected, hint.example
+                "{}",
+                tf(
+                    "cli.new.invalid_question",
+                    &[
+                        ("error", err),
+                        ("expected", hint.expected),
+                        ("example", hint.example),
+                    ]
+                )
             );
             continue;
         }
@@ -264,7 +290,7 @@ fn run_new(out_dir: Option<PathBuf>, force: bool, verbose: bool) -> CliResult<()
     }
 
     if questions.is_empty() {
-        return Err("at least one question is required".into());
+        return Err(t("cli.new.at_least_one_question").into());
     }
 
     let validations = prompt_cross_field_validations(&questions)?;
@@ -288,9 +314,9 @@ fn run_new(out_dir: Option<PathBuf>, force: bool, verbose: bool) -> CliResult<()
         if force {
             fs::remove_dir_all(&bundle_dir)?;
         } else {
-            return Err(format!(
-                "bundle {} already exists; rerun with --force to overwrite",
-                bundle_dir.display()
+            return Err(tf(
+                "cli.bundle.exists",
+                &[("path", bundle_dir.display().to_string())],
             )
             .into());
         }
@@ -298,9 +324,15 @@ fn run_new(out_dir: Option<PathBuf>, force: bool, verbose: bool) -> CliResult<()
 
     let bundle = build_bundle(&input)?;
     let bundle_dir = write_bundle(&bundle, &input, &out_root)?;
-    println!("Generated QA bundle at {}", bundle_dir.display());
+    println!(
+        "{}",
+        tf(
+            "cli.bundle.generated",
+            &[("path", bundle_dir.display().to_string())]
+        )
+    );
     if verbose {
-        println!("Detailed bundle state:");
+        println!("{}", t("cli.bundle.details"));
         dump_bundle_debug(&bundle)?;
     }
     Ok(())
@@ -314,21 +346,21 @@ fn validate_question_input(question: &QuestionInput) -> Result<(), String> {
             .map(|choices| !choices.is_empty())
             .unwrap_or(false);
         if !has_choices {
-            return Err("enum questions require at least one comma-separated choice".into());
+            return Err(t("cli.new.enum_choices_required"));
         }
     }
     if matches!(question.kind, CliQuestionType::List) {
         let list = question
             .list
             .as_ref()
-            .ok_or("list questions must define list metadata")?;
+            .ok_or_else(|| t("cli.new.list_metadata_required"))?;
         if list.fields.is_empty() {
-            return Err("list questions must define at least one field".into());
+            return Err(t("cli.new.list_fields_required"));
         }
         if let (Some(min), Some(max)) = (list.min_items, list.max_items)
             && min > max
         {
-            return Err("list minimum cannot exceed maximum".into());
+            return Err(t("cli.new.list_min_gt_max"));
         }
     }
 
@@ -340,13 +372,13 @@ fn validate_question_input(question: &QuestionInput) -> Result<(), String> {
 }
 
 fn dump_bundle_debug(bundle: &GeneratedBundle) -> CliResult<()> {
-    println!("Form specification:");
+    println!("{}", t("cli.bundle.form_spec"));
     println!("{}", serde_json::to_string_pretty(&bundle.spec)?);
-    println!("Flow specification:");
+    println!("{}", t("cli.bundle.flow_spec"));
     println!("{}", serde_json::to_string_pretty(&bundle.flow)?);
-    println!("Answer schema:");
+    println!("{}", t("cli.bundle.answer_schema"));
     println!("{}", serde_json::to_string_pretty(&bundle.schema)?);
-    println!("Example answers:");
+    println!("{}", t("cli.bundle.example_answers"));
     println!("{}", serde_json::to_string_pretty(&bundle.examples)?);
     Ok(())
 }
@@ -362,47 +394,43 @@ fn ensure_default_matches_type(
         CliQuestionType::Number => parse_number_default(default),
         CliQuestionType::Enum => parse_enum_default(default, choices),
         CliQuestionType::String => Ok(()),
-        CliQuestionType::List => Err("list questions cannot have default values".into()),
+        CliQuestionType::List => Err(t("cli.new.list_default_not_allowed")),
     }
 }
 
 fn parse_boolean_default(raw: &str) -> Result<(), String> {
     match raw.to_lowercase().as_str() {
         "true" | "t" | "yes" | "y" | "1" | "false" | "f" | "no" | "n" | "0" => Ok(()),
-        _ => Err("Boolean default must be yes/no/true/false/1/0.".into()),
+        _ => Err(t("cli.new.boolean_default_invalid")),
     }
 }
 
 fn parse_integer_default(raw: &str) -> Result<(), String> {
-    raw.parse::<i64>().map(|_| ()).map_err(|_| {
-        "Default value for integer questions must be a whole number (leave blank to skip).".into()
-    })
+    raw.parse::<i64>()
+        .map(|_| ())
+        .map_err(|_| t("cli.new.integer_default_invalid"))
 }
 
 fn parse_number_default(raw: &str) -> Result<(), String> {
     raw.parse::<f64>()
-        .map_err(|_| {
-            "Default value for number questions must be numeric (leave blank to skip).".into()
-        })
+        .map_err(|_| t("cli.new.number_default_invalid"))
         .and_then(|value| {
             if value.is_finite() {
                 Ok(())
             } else {
-                Err("Default number must be finite.".into())
+                Err(t("cli.new.number_default_not_finite"))
             }
         })
 }
 
 fn parse_enum_default(raw: &str, choices: Option<&[String]>) -> Result<(), String> {
-    let choices = choices.ok_or_else(|| {
-        "Enum default cannot be validated because no choices were provided.".to_string()
-    })?;
+    let choices = choices.ok_or_else(|| t("cli.new.enum_default_no_choices"))?;
     if choices.iter().any(|choice| choice == raw) {
         Ok(())
     } else {
-        Err(format!(
-            "Default must match one of the choices: {}.",
-            choices.join(", ")
+        Err(tf(
+            "cli.new.enum_default_must_match",
+            &[("choices", choices.join(", "))],
         ))
     }
 }
@@ -422,9 +450,9 @@ fn run_generate(
         if force {
             fs::remove_dir_all(&bundle_dir)?;
         } else {
-            return Err(format!(
-                "bundle {} already exists; rerun with --force to overwrite",
-                bundle_dir.display()
+            return Err(tf(
+                "cli.bundle.exists",
+                &[("path", bundle_dir.display().to_string())],
             )
             .into());
         }
@@ -432,9 +460,15 @@ fn run_generate(
 
     let bundle = build_bundle(&input)?;
     let bundle_dir = write_bundle(&bundle, &input, &out_root)?;
-    println!("Generated QA bundle at {}", bundle_dir.display());
+    println!(
+        "{}",
+        tf(
+            "cli.bundle.generated",
+            &[("path", bundle_dir.display().to_string())]
+        )
+    );
     if verbose {
-        println!("Detailed bundle state:");
+        println!("{}", t("cli.bundle.details"));
         dump_bundle_debug(&bundle)?;
     }
     Ok(())
@@ -448,41 +482,71 @@ fn run_validate(spec_path: PathBuf, answers_path: PathBuf) -> CliResult<()> {
 
     let result = validate(&spec, &answers);
     println!(
-        "Validation result: {}",
-        if result.valid { "valid" } else { "invalid" }
+        "{}",
+        tf(
+            "cli.validate.result",
+            &[(
+                "result",
+                if result.valid {
+                    t("cli.validate.valid")
+                } else {
+                    t("cli.validate.invalid")
+                }
+            )]
+        )
     );
     describe_validation(&result);
 
     if result.valid {
         Ok(())
     } else {
-        Err("validation failed".into())
+        Err(t("cli.validate.failed").into())
     }
 }
 
 fn describe_validation(result: &ValidationResult) {
     if !result.errors.is_empty() {
-        println!("Errors:");
+        println!("{}", t("cli.validate.errors_header"));
         for error in &result.errors {
+            let unknown = t("cli.common.unknown");
             println!(
                 "  {} - {}",
-                error.path.as_deref().unwrap_or("<unknown>"),
-                error.message
+                error.path.as_deref().unwrap_or(unknown.as_str()),
+                format_validation_error(error)
             );
         }
     }
     if !result.missing_required.is_empty() {
         println!(
-            "Missing required answers: {}",
-            result.missing_required.join(", ")
+            "{}",
+            tf(
+                "cli.validate.missing_required",
+                &[("fields", result.missing_required.join(", "))]
+            )
         );
     }
     if !result.unknown_fields.is_empty() {
         println!(
-            "Unknown answer fields: {}",
-            result.unknown_fields.join(", ")
+            "{}",
+            tf(
+                "cli.validate.unknown_fields",
+                &[("fields", result.unknown_fields.join(", "))]
+            )
         );
     }
+}
+
+fn format_validation_error(error: &qa_spec::ValidationError) -> String {
+    if error.message.starts_with("qa_spec.") {
+        let key = format!("cli.validate.error.{}", error.message);
+        let args = error
+            .params
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect::<Vec<_>>();
+        return tf(&key, &args);
+    }
+    error.message.clone()
 }
 
 fn resolve_output_root(out: Option<PathBuf>) -> CliResult<PathBuf> {
@@ -493,7 +557,7 @@ fn resolve_output_root(out: Option<PathBuf>) -> CliResult<PathBuf> {
             .unwrap_or_else(|| PathBuf::from(".")),
     };
     if candidate.as_os_str().is_empty() {
-        return Err("output directory cannot be empty".into());
+        return Err(t("cli.output_dir.empty").into());
     }
     ensure_allowed_root(&candidate)?;
     Ok(candidate)
@@ -623,13 +687,13 @@ fn run_wizard(options: WizardCliOptions) -> CliResult<()> {
         let frontend_payload = driver.next_payload_json()?;
         let ui_raw = driver
             .last_ui_json()
-            .ok_or("wizard UI payload is unavailable")?
+            .ok_or_else(|| t("cli.wizard.ui_payload_unavailable"))?
             .to_string();
         let ui: Value = serde_json::from_str(&ui_raw)?;
         print_render_output(options.format, &frontend_payload, Some(&ui_raw))?;
 
-        let payload =
-            WizardPayload::from_json(&ui).map_err(|err| format!("wizard UI error: {}", err))?;
+        let payload = WizardPayload::from_json(&ui)
+            .map_err(|err| tf("cli.wizard.ui_error", &[("error", err)]))?;
         presenter.show_header(&payload);
         presenter.show_status(&payload);
 
@@ -638,13 +702,16 @@ fn run_wizard(options: WizardCliOptions) -> CliResult<()> {
         }
         let question_id = ui["next_question_id"]
             .as_str()
-            .ok_or("wizard failed to return a next question")?
+            .ok_or_else(|| t("cli.wizard.next_question_missing"))?
             .to_string();
 
         let question = find_question(&ui, &question_id)?;
-        let question_info = payload
-            .question(&question_id)
-            .ok_or_else(|| format!("wizard payload missing question '{}'", question_id))?;
+        let question_info = payload.question(&question_id).ok_or_else(|| {
+            tf(
+                "cli.wizard.payload_missing_question",
+                &[("id", question_id.clone())],
+            )
+        })?;
         let prompt = PromptContext::new(question_info, &payload.progress);
         let answer = prompt_question(&prompt, &question, &presenter)?;
 
@@ -679,7 +746,12 @@ fn find_question(ui: &Value, question_id: &str) -> CliResult<Value> {
                 .find(|question| question["id"].as_str() == Some(question_id))
                 .cloned()
         })
-        .ok_or_else(|| format!("question '{}' not found", question_id))?;
+        .ok_or_else(|| {
+            tf(
+                "cli.wizard.question_not_found",
+                &[("id", question_id.to_string())],
+            )
+        })?;
     Ok(question)
 }
 
@@ -697,7 +769,7 @@ fn prompt_question(
 
         let trimmed = input.trim();
         if trimmed.eq_ignore_ascii_case("exit") {
-            return Err("wizard aborted by user".into());
+            return Err(t("cli.wizard.aborted").into());
         }
 
         match parse_answer(question, trimmed) {
@@ -727,10 +799,7 @@ fn parse_answer(question: &Value, raw: &str) -> Result<Value, AnswerParseError> 
         {
             return Ok(Value::Null);
         }
-        return Err(AnswerParseError::new(
-            "This question requires an answer.",
-            None,
-        ));
+        return Err(AnswerParseError::new(t("cli.wizard.required_answer"), None));
     }
 
     match question
@@ -752,7 +821,7 @@ fn parse_boolean(raw: &str) -> Result<Value, AnswerParseError> {
         "true" | "t" | "yes" | "y" | "1" => Ok(Value::Bool(true)),
         "false" | "f" | "no" | "n" | "0" => Ok(Value::Bool(false)),
         _ => Err(AnswerParseError::new(
-            "Please enter yes or no.",
+            t("cli.parse.boolean_prompt"),
             Some("expected boolean (y/n/true/false)".to_string()),
         )),
     }
@@ -764,7 +833,7 @@ fn parse_integer(raw: &str) -> Result<Value, AnswerParseError> {
         .map(Value::Number)
         .map_err(|_| {
             AnswerParseError::new(
-                "Please enter a whole number.",
+                t("cli.parse.integer_prompt"),
                 Some("expected integer".to_string()),
             )
         })
@@ -774,7 +843,7 @@ fn parse_number(raw: &str) -> Result<Value, AnswerParseError> {
     raw.parse::<f64>()
         .map_err(|_| {
             AnswerParseError::new(
-                "Please enter a number.",
+                t("cli.parse.number_prompt"),
                 Some("expected number".to_string()),
             )
         })
@@ -783,7 +852,7 @@ fn parse_number(raw: &str) -> Result<Value, AnswerParseError> {
                 .map(Value::Number)
                 .ok_or_else(|| {
                     AnswerParseError::new(
-                        "Please enter a finite number.",
+                        t("cli.parse.number_finite"),
                         Some("number must be finite".to_string()),
                     )
                 })
@@ -794,7 +863,7 @@ fn parse_enum(question: &Value, raw: &str) -> Result<Value, AnswerParseError> {
     let choices = question
         .get("choices")
         .and_then(Value::as_array)
-        .ok_or_else(|| AnswerParseError::new("Choices are not defined for this question.", None))?;
+        .ok_or_else(|| AnswerParseError::new(t("cli.parse.choices_missing"), None))?;
 
     let allowed = choices
         .iter()
@@ -809,8 +878,14 @@ fn parse_enum(question: &Value, raw: &str) -> Result<Value, AnswerParseError> {
         Ok(Value::String(choice.to_string()))
     } else {
         Err(AnswerParseError::new(
-            format!("Choose one of: {}.", allowed.join(", ")),
-            Some(format!("allowed values: {}", allowed.join(", "))),
+            tf(
+                "cli.parse.choose_one_of",
+                &[("choices", allowed.join(", "))],
+            ),
+            Some(tf(
+                "cli.parse.allowed_values",
+                &[("choices", allowed.join(", "))],
+            )),
         ))
     }
 }
@@ -819,14 +894,14 @@ fn parse_list(question: &Value, raw: &str) -> Result<Value, AnswerParseError> {
     match serde_json::from_str::<Value>(raw) {
         Ok(value) if value.is_array() => Ok(value),
         Ok(_) => Err(AnswerParseError::new(
-            "List answers must be a JSON array.",
-            Some(format!(
-                "expected array of fields [{}]",
-                describe_list_fields(question)
+            t("cli.parse.list_array"),
+            Some(tf(
+                "cli.parse.list_expected_fields",
+                &[("fields", describe_list_fields(question))],
             )),
         )),
         Err(err) => Err(AnswerParseError::new(
-            "Invalid list; provide a JSON array (e.g. [{\"field\": \"value\"}]).",
+            t("cli.parse.list_invalid"),
             Some(err.to_string()),
         )),
     }
@@ -846,7 +921,7 @@ fn describe_list_fields(question: &Value) -> String {
                 .join(", ")
         })
         .filter(|description| !description.is_empty())
-        .unwrap_or_else(|| "<unknown>".into())
+        .unwrap_or_else(|| t("cli.common.unknown"))
 }
 
 fn prompt_line(prompt: &str, default: Option<&str>) -> CliResult<String> {
@@ -885,25 +960,26 @@ fn prompt_non_empty(prompt: &str, default: Option<&str>) -> CliResult<String> {
         if !value.trim().is_empty() {
             return Ok(value);
         }
-        println!("Value cannot be empty.");
+        println!("{}", t("cli.prompt.value_empty"));
     }
 }
 
 fn mark_required(prompt: &str) -> String {
-    let trimmed = prompt.trim();
-    if trimmed.to_lowercase().contains("required") {
-        trimmed.to_string()
-    } else {
-        format!("{} (required)", trimmed)
-    }
+    tf(
+        "cli.prompt.required_label",
+        &[("label", prompt.trim().to_string())],
+    )
 }
 
 fn describe_list_size(min_items: Option<usize>, max_items: Option<usize>) -> String {
     match (min_items, max_items) {
-        (Some(min), Some(max)) => format!("{} to {} items", min, max),
-        (Some(min), None) => format!("at least {} items", min),
-        (None, Some(max)) => format!("up to {} items", max),
-        (None, None) => "unrestricted".into(),
+        (Some(min), Some(max)) => tf(
+            "cli.prompt.list_size_range",
+            &[("min", min.to_string()), ("max", max.to_string())],
+        ),
+        (Some(min), None) => tf("cli.prompt.list_size_min", &[("min", min.to_string())]),
+        (None, Some(max)) => tf("cli.prompt.list_size_max", &[("max", max.to_string())]),
+        (None, None) => t("cli.prompt.list_size_unrestricted"),
     }
 }
 
@@ -927,63 +1003,72 @@ fn describe_type_hint(
 ) -> TypeHint {
     match kind {
         CliQuestionType::String => TypeHint {
-            expected: "text".into(),
-            example: "\"Acme Corp\"".into(),
+            expected: t("cli.type_hint.string.expected"),
+            example: t("cli.type_hint.string.example"),
         },
         CliQuestionType::Boolean => TypeHint {
-            expected: "boolean (yes/no)".into(),
-            example: "yes".into(),
+            expected: t("cli.type_hint.boolean.expected"),
+            example: t("cli.type_hint.boolean.example"),
         },
         CliQuestionType::Integer => TypeHint {
-            expected: "integer (whole number)".into(),
-            example: "42".into(),
+            expected: t("cli.type_hint.integer.expected"),
+            example: t("cli.type_hint.integer.example"),
         },
         CliQuestionType::Number => TypeHint {
-            expected: "number (decimals allowed)".into(),
-            example: "3.14".into(),
+            expected: t("cli.type_hint.number.expected"),
+            example: t("cli.type_hint.number.example"),
         },
         CliQuestionType::Enum => {
-            let mut expected = "enum choice".to_string();
+            let mut expected = t("cli.type_hint.enum.expected");
             if let Some(values) = choices
                 && !values.is_empty()
             {
-                expected = format!("enum (one of: {})", values.join(", "));
+                expected = tf(
+                    "cli.type_hint.enum.one_of",
+                    &[("choices", values.join(", "))],
+                );
             }
             let example = choices
                 .and_then(|values| values.first())
                 .cloned()
-                .unwrap_or_else(|| "example-choice".into());
+                .unwrap_or_else(|| t("cli.type_hint.enum.example"));
             TypeHint { expected, example }
         }
         CliQuestionType::List => {
             let fields_desc = list_fields
                 .map(summarize_list_fields)
-                .unwrap_or_else(|| "configured fields".into());
+                .unwrap_or_else(|| t("cli.type_hint.list.fields"));
             TypeHint {
-                expected: format!("list (JSON array of objects with fields: {})", fields_desc),
-                example: "[{\"field\": \"value\"}]".into(),
+                expected: tf("cli.type_hint.list.expected", &[("fields", fields_desc)]),
+                example: t("cli.type_hint.list.example"),
             }
         }
     }
 }
 
 fn prompt_visibility_condition(questions: &[QuestionInput]) -> CliResult<Option<Expr>> {
-    if questions.is_empty() || !prompt_bool("Add visibility condition?", false)? {
+    if questions.is_empty() || !prompt_bool(&t("cli.prompt.add_visibility_condition"), false)? {
         return Ok(None);
     }
-    println!("Existing questions: {}", existing_question_ids(questions));
+    println!(
+        "{}",
+        tf(
+            "cli.prompt.existing_questions",
+            &[("ids", existing_question_ids(questions))]
+        )
+    );
     let expr = prompt_boolean_expression(questions, 0)?;
     Ok(Some(expr))
 }
 
 fn prompt_boolean_expression(questions: &[QuestionInput], depth: usize) -> CliResult<Expr> {
     const MAX_DEPTH: usize = 4;
-    let mut prompt = String::from("Expression type (comparison/is_set");
+    let mut prompt = t("cli.prompt.expr_type_prefix");
     if depth < MAX_DEPTH {
         prompt.push_str("/and/or/not");
     }
     prompt.push(')');
-    let choice = prompt_line(&prompt, Some("comparison"))?;
+    let choice = prompt_line(&prompt, Some(&t("cli.prompt.expr_type_default")))?;
     match choice.trim().to_lowercase().as_str() {
         "is_set" => prompt_is_set_expression(questions),
         "and" if depth < MAX_DEPTH => {
@@ -1007,26 +1092,35 @@ fn prompt_boolean_expression(questions: &[QuestionInput], depth: usize) -> CliRe
             })
         }
         _ => {
-            println!("Building comparison expression...");
+            println!("{}", t("cli.prompt.building_comparison"));
             prompt_comparison_expression(questions)
         }
     }
 }
 
 fn prompt_comparison_expression(questions: &[QuestionInput]) -> CliResult<Expr> {
-    println!("Existing questions: {}", existing_question_ids(questions));
-    let operator = prompt_line("Operator (eq/ne/lt/lte/gt/gte)", Some("eq"))?;
+    println!(
+        "{}",
+        tf(
+            "cli.prompt.existing_questions",
+            &[("ids", existing_question_ids(questions))]
+        )
+    );
+    let operator = prompt_line(&t("cli.prompt.operator"), Some("eq"))?;
     let normalized = operator.trim().to_lowercase();
-    let left_id = prompt_non_empty("Question ID to compare", None)?;
+    let left_id = prompt_non_empty(&t("cli.prompt.question_id_compare"), None)?;
     let left_expr = Expr::Answer { path: left_id };
-    let operand = prompt_line("Right operand type (literal/question)", Some("literal"))?;
+    let operand = prompt_line(
+        &t("cli.prompt.right_operand_type"),
+        Some(&t("cli.prompt.right_operand_default")),
+    )?;
     let right_expr = match operand.trim().to_lowercase().as_str() {
         "question" | "answer" => {
-            let right_id = prompt_non_empty("Question ID for right operand", None)?;
+            let right_id = prompt_non_empty(&t("cli.prompt.right_operand_question_id"), None)?;
             Expr::Answer { path: right_id }
         }
         _ => {
-            let value = prompt_non_empty("Value to compare against", None)?;
+            let value = prompt_non_empty(&t("cli.prompt.value_compare_against"), None)?;
             Expr::Literal {
                 value: parse_expression_literal(&value),
             }
@@ -1036,8 +1130,14 @@ fn prompt_comparison_expression(questions: &[QuestionInput]) -> CliResult<Expr> 
 }
 
 fn prompt_is_set_expression(questions: &[QuestionInput]) -> CliResult<Expr> {
-    println!("Existing questions: {}", existing_question_ids(questions));
-    let target = prompt_non_empty("Question ID to check for presence", None)?;
+    println!(
+        "{}",
+        tf(
+            "cli.prompt.existing_questions",
+            &[("ids", existing_question_ids(questions))]
+        )
+    );
+    let target = prompt_non_empty(&t("cli.prompt.question_id_presence"), None)?;
     Ok(Expr::IsSet { path: target })
 }
 
@@ -1045,9 +1145,9 @@ fn prompt_cross_field_validations(
     questions: &[QuestionInput],
 ) -> CliResult<Vec<CrossFieldValidation>> {
     let mut validations = Vec::new();
-    while prompt_bool("Add cross-field validation?", false)? {
-        let id = prompt_optional("Validation ID (optional)")?;
-        let message = prompt_non_empty("Validation message", None)?;
+    while prompt_bool(&t("cli.prompt.add_cross_field_validation"), false)? {
+        let id = prompt_optional(&t("cli.prompt.validation_id"))?;
+        let message = prompt_non_empty(&t("cli.prompt.validation_message"), None)?;
         let fields = prompt_validation_fields(questions)?;
         let condition = prompt_boolean_expression(questions, 0)?;
         validations.push(CrossFieldValidation {
@@ -1063,8 +1163,14 @@ fn prompt_cross_field_validations(
 
 fn prompt_validation_fields(questions: &[QuestionInput]) -> CliResult<Vec<String>> {
     loop {
-        println!("Available questions: {}", existing_question_ids(questions));
-        let raw = prompt_line("Fields to validate (comma separated question IDs)", None)?;
+        println!(
+            "{}",
+            tf(
+                "cli.prompt.available_questions",
+                &[("ids", existing_question_ids(questions))]
+            )
+        );
+        let raw = prompt_line(&t("cli.prompt.fields_to_validate"), None)?;
         let mut fields = raw
             .split(',')
             .map(str::trim)
@@ -1073,7 +1179,7 @@ fn prompt_validation_fields(questions: &[QuestionInput]) -> CliResult<Vec<String
             .collect::<Vec<_>>();
         fields.dedup();
         if fields.is_empty() {
-            println!("Provide at least one field.");
+            println!("{}", t("cli.prompt.at_least_one_field"));
             continue;
         }
         let unknown = fields
@@ -1082,7 +1188,13 @@ fn prompt_validation_fields(questions: &[QuestionInput]) -> CliResult<Vec<String
             .cloned()
             .collect::<Vec<_>>();
         if !unknown.is_empty() {
-            println!("Unknown fields: {}.", unknown.join(", "));
+            println!(
+                "{}",
+                tf(
+                    "cli.prompt.unknown_fields",
+                    &[("fields", unknown.join(", "))]
+                )
+            );
             continue;
         }
         return Ok(fields);
@@ -1097,23 +1209,33 @@ fn prompt_computed_field(
     kind: CliQuestionType,
     existing: &[QuestionInput],
 ) -> CliResult<(Option<Expr>, bool)> {
-    if matches!(kind, CliQuestionType::List) || !prompt_bool("Compute this question value?", false)?
+    if matches!(kind, CliQuestionType::List)
+        || !prompt_bool(&t("cli.prompt.compute_question_value"), false)?
     {
         return Ok((None, false));
     }
-    println!("Existing questions: {}", existing_question_ids(existing));
+    println!(
+        "{}",
+        tf(
+            "cli.prompt.existing_questions",
+            &[("ids", existing_question_ids(existing))]
+        )
+    );
     loop {
-        let source = prompt_line("Computed source (answer/literal)", Some("answer"))?;
+        let source = prompt_line(
+            &t("cli.prompt.computed_source"),
+            Some(&t("cli.prompt.computed_source_default")),
+        )?;
         let normalized = source.trim().to_lowercase();
         match normalized.as_str() {
             "answer" => {
-                let question = prompt_non_empty("Source question ID", None)?;
-                let overrides = prompt_bool("Allow overriding computed value?", false)?;
+                let question = prompt_non_empty(&t("cli.prompt.source_question_id"), None)?;
+                let overrides = prompt_bool(&t("cli.prompt.allow_override_computed"), false)?;
                 return Ok((Some(Expr::Answer { path: question }), overrides));
             }
             "literal" => {
-                let literal = prompt_non_empty("Literal value", None)?;
-                let overrides = prompt_bool("Allow overriding computed value?", false)?;
+                let literal = prompt_non_empty(&t("cli.prompt.literal_value"), None)?;
+                let overrides = prompt_bool(&t("cli.prompt.allow_override_computed"), false)?;
                 return Ok((
                     Some(Expr::Literal {
                         value: parse_expression_literal(&literal),
@@ -1122,7 +1244,13 @@ fn prompt_computed_field(
                 ));
             }
             _ => {
-                println!("Unknown source '{}'. Choose answer or literal.", normalized);
+                println!(
+                    "{}",
+                    tf(
+                        "cli.prompt.unknown_source",
+                        &[("source", normalized.clone())]
+                    )
+                );
             }
         }
     }
@@ -1138,25 +1266,25 @@ fn prompt_constraint(kind: CliQuestionType) -> CliResult<Option<Constraint>> {
     };
     let mut changed = false;
     if matches!(kind, CliQuestionType::Integer | CliQuestionType::Number) {
-        if let Some(min) = prompt_optional_f64("Minimum numeric value (blank for none)")? {
+        if let Some(min) = prompt_optional_f64(&t("cli.prompt.min_numeric_value"))? {
             constraint.min = Some(min);
             changed = true;
         }
-        if let Some(max) = prompt_optional_f64("Maximum numeric value (blank for none)")? {
+        if let Some(max) = prompt_optional_f64(&t("cli.prompt.max_numeric_value"))? {
             constraint.max = Some(max);
             changed = true;
         }
     }
     if matches!(kind, CliQuestionType::String | CliQuestionType::Enum) {
-        if let Some(min_len) = prompt_optional_usize("Minimum length (blank for none)")? {
+        if let Some(min_len) = prompt_optional_usize(&t("cli.prompt.min_length"))? {
             constraint.min_len = Some(min_len);
             changed = true;
         }
-        if let Some(max_len) = prompt_optional_usize("Maximum length (blank for none)")? {
+        if let Some(max_len) = prompt_optional_usize(&t("cli.prompt.max_length"))? {
             constraint.max_len = Some(max_len);
             changed = true;
         }
-        if let Some(pattern) = prompt_optional("Regex pattern (blank for none)")?
+        if let Some(pattern) = prompt_optional(&t("cli.prompt.regex_pattern"))?
             && !pattern.trim().is_empty()
         {
             constraint.pattern = Some(pattern);
@@ -1180,7 +1308,7 @@ fn prompt_optional_f64(prompt: &str) -> CliResult<Option<f64>> {
         match trimmed.parse::<f64>() {
             Ok(value) => return Ok(Some(value)),
             Err(_) => {
-                println!("Enter a number or leave blank.");
+                println!("{}", t("cli.prompt.enter_number_or_blank"));
             }
         }
     }
@@ -1210,7 +1338,7 @@ fn parse_expression_literal(raw: &str) -> Value {
 
 fn existing_question_ids(questions: &[QuestionInput]) -> String {
     if questions.is_empty() {
-        "<none>".into()
+        t("cli.common.none")
     } else {
         questions
             .iter()
@@ -1266,7 +1394,10 @@ fn render_list_example(fields: &[QuestionInput]) -> String {
 }
 
 fn prompt_bool(prompt: &str, default: bool) -> CliResult<bool> {
-    let prompt_text = format!("{} (y/n)", prompt.trim());
+    let prompt_text = tf(
+        "cli.prompt.yes_no",
+        &[("prompt", prompt.trim().to_string())],
+    );
     let default_hint = if default { "Y" } else { "N" };
     loop {
         let line = prompt_line(&prompt_text, Some(default_hint))?;
@@ -1275,7 +1406,13 @@ fn prompt_bool(prompt: &str, default: bool) -> CliResult<bool> {
             "y" | "yes" => return Ok(true),
             "n" | "no" => return Ok(false),
             other => {
-                println!("Invalid answer '{}'. Expected yes or no.", other);
+                println!(
+                    "{}",
+                    tf(
+                        "cli.prompt.invalid_yes_no",
+                        &[("answer", other.to_string())]
+                    )
+                );
             }
         }
     }
@@ -1283,10 +1420,7 @@ fn prompt_bool(prompt: &str, default: bool) -> CliResult<bool> {
 
 fn prompt_question_type() -> CliResult<CliQuestionType> {
     loop {
-        let value = prompt_line(
-            "Question type (string|boolean|integer|number|enum|list)",
-            Some("string"),
-        )?;
+        let value = prompt_line(&t("cli.prompt.question_type"), Some("string"))?;
         match CliQuestionType::from_str(&value) {
             Ok(kind) => return Ok(kind),
             Err(err) => println!("{}", err),
@@ -1296,7 +1430,7 @@ fn prompt_question_type() -> CliResult<CliQuestionType> {
 
 fn prompt_enum_choices() -> CliResult<Vec<String>> {
     loop {
-        let raw = prompt_line("Comma separated choices (e.g. alpha,beta,gamma)", None)?;
+        let raw = prompt_line(&t("cli.prompt.enum_choices"), None)?;
         let normalized = raw
             .split(',')
             .map(str::trim)
@@ -1304,7 +1438,7 @@ fn prompt_enum_choices() -> CliResult<Vec<String>> {
             .map(|choice| choice.to_string())
             .collect::<Vec<_>>();
         if normalized.is_empty() {
-            println!("Provide at least one choice for enum questions.");
+            println!("{}", t("cli.prompt.enum_choices_required"));
             continue;
         }
         return Ok(normalized);
@@ -1321,7 +1455,7 @@ fn prompt_optional_usize(prompt: &str) -> CliResult<Option<usize>> {
         match trimmed.parse::<usize>() {
             Ok(value) => return Ok(Some(value)),
             Err(_) => {
-                println!("Please enter a whole number or leave blank.");
+                println!("{}", t("cli.prompt.enter_whole_number_or_blank"));
             }
         }
     }
@@ -1329,29 +1463,46 @@ fn prompt_optional_usize(prompt: &str) -> CliResult<Option<usize>> {
 
 fn prompt_list_input() -> CliResult<ListInput> {
     loop {
-        let min_items = prompt_optional_usize("Minimum items (blank for no limit)")?;
-        let max_items = prompt_optional_usize("Maximum items (blank for no limit)")?;
+        let min_items = prompt_optional_usize(&t("cli.prompt.min_items"))?;
+        let max_items = prompt_optional_usize(&t("cli.prompt.max_items"))?;
         if let (Some(min), Some(max)) = (min_items, max_items)
             && min > max
         {
-            println!("Minimum items cannot exceed maximum items.");
-            continue;
-        }
-
-        println!("List size: {}.", describe_list_size(min_items, max_items));
-
-        let fields = prompt_list_fields()?;
-        if fields.is_empty() {
-            println!("At least one field must be defined for a list.");
+            println!("{}", t("cli.prompt.min_items_gt_max_items"));
             continue;
         }
 
         println!(
-            "Defined {} list field(s): {}",
-            fields.len(),
-            summarize_list_fields(&fields)
+            "{}",
+            tf(
+                "cli.prompt.list_size",
+                &[("size", describe_list_size(min_items, max_items))]
+            )
         );
-        println!("Example list entry: {}", render_list_example(&fields));
+
+        let fields = prompt_list_fields()?;
+        if fields.is_empty() {
+            println!("{}", t("cli.prompt.list_requires_field"));
+            continue;
+        }
+
+        println!(
+            "{}",
+            tf(
+                "cli.prompt.defined_list_fields",
+                &[
+                    ("count", fields.len().to_string()),
+                    ("fields", summarize_list_fields(&fields)),
+                ]
+            )
+        );
+        println!(
+            "{}",
+            tf(
+                "cli.prompt.example_list_entry",
+                &[("entry", render_list_example(&fields))]
+            )
+        );
 
         return Ok(ListInput {
             min_items,
@@ -1364,11 +1515,14 @@ fn prompt_list_input() -> CliResult<ListInput> {
 fn prompt_list_fields() -> CliResult<Vec<QuestionInput>> {
     let mut fields: Vec<QuestionInput> = Vec::new();
     loop {
-        let field_id = prompt_optional("Field ID (blank to finish)")?;
+        let field_id = prompt_optional(&t("cli.prompt.field_id"))?;
         let field_id = match field_id.filter(|value| !value.trim().is_empty()) {
             Some(id) => {
                 if fields.iter().any(|field| field.id == id) {
-                    println!("Field ID '{}' already used; choose another.", id);
+                    println!(
+                        "{}",
+                        tf("cli.prompt.field_id_duplicate", &[("id", id.to_string())])
+                    );
                     continue;
                 }
                 id
@@ -1380,13 +1534,13 @@ fn prompt_list_fields() -> CliResult<Vec<QuestionInput>> {
         let field_kind = loop {
             let kind = prompt_question_type()?;
             if matches!(kind, CliQuestionType::List) {
-                println!("Nested list fields are not allowed.");
+                println!("{}", t("cli.prompt.nested_list_not_allowed"));
                 continue;
             }
             break kind;
         };
-        let required = prompt_bool("Field required?", true)?;
-        let field_description = prompt_optional("Field description (optional)")?;
+        let required = prompt_bool(&t("cli.prompt.field_required"), true)?;
+        let field_description = prompt_optional(&t("cli.prompt.field_description"))?;
         let field_choices = if matches!(field_kind, CliQuestionType::Enum) {
             Some(prompt_enum_choices()?)
         } else {
@@ -1399,12 +1553,15 @@ fn prompt_list_fields() -> CliResult<Vec<QuestionInput>> {
                 && let Err(err) =
                     ensure_default_matches_type(field_kind, value, field_choices.as_deref())
             {
-                println!("Invalid default: {} Please try again.", err);
+                println!(
+                    "{}",
+                    tf("cli.prompt.invalid_default_retry", &[("error", err)])
+                );
                 continue;
             }
             break candidate;
         };
-        let field_secret = prompt_bool("Field secret value?", false)?;
+        let field_secret = prompt_bool(&t("cli.prompt.field_secret"), false)?;
         let field_hint = describe_type_hint(field_kind, field_choices.as_deref(), None);
         let field_input = QuestionInput {
             id: field_id.clone(),
@@ -1422,19 +1579,33 @@ fn prompt_list_fields() -> CliResult<Vec<QuestionInput>> {
             computed_overridable: false,
         };
         if let Err(err) = validate_question_input(&field_input) {
-            println!("Invalid field: {}. Let's try again.", err);
+            println!(
+                "{}",
+                tf("cli.prompt.invalid_field_retry", &[("error", err)])
+            );
             continue;
         }
         fields.push(field_input);
         println!(
-            "Added list field '{}': {} (total {}).",
-            field_id,
-            field_kind,
-            fields.len()
+            "{}",
+            tf(
+                "cli.prompt.added_list_field",
+                &[
+                    ("id", field_id.clone()),
+                    ("kind", field_kind.to_string()),
+                    ("count", fields.len().to_string()),
+                ]
+            )
         );
         println!(
-            "Field hint: expected {} (example {}).",
-            field_hint.expected, field_hint.example
+            "{}",
+            tf(
+                "cli.prompt.field_hint",
+                &[
+                    ("expected", field_hint.expected),
+                    ("example", field_hint.example),
+                ]
+            )
         );
     }
 
@@ -1443,16 +1614,17 @@ fn prompt_list_fields() -> CliResult<Vec<QuestionInput>> {
 
 fn default_prompt_for(kind: CliQuestionType, choices: Option<&[String]>) -> String {
     match kind {
-        CliQuestionType::Boolean => "Default value (yes/no or leave blank for optional)".into(),
-        CliQuestionType::Integer => "Default value (optional, enter a whole number)".into(),
-        CliQuestionType::Number => "Default value (optional, enter a number)".into(),
+        CliQuestionType::Boolean => t("cli.prompt.default_value_boolean"),
+        CliQuestionType::Integer => t("cli.prompt.default_value_integer"),
+        CliQuestionType::Number => t("cli.prompt.default_value_number"),
         CliQuestionType::Enum => match choices {
-            Some(choices) if !choices.is_empty() => {
-                format!("Default value (optional, one of {})", choices.join("/"))
-            }
-            _ => "Default value (optional, match one of the provided choices)".into(),
+            Some(choices) if !choices.is_empty() => tf(
+                "cli.prompt.default_value_enum_one_of",
+                &[("choices", choices.join("/"))],
+            ),
+            _ => t("cli.prompt.default_value_enum"),
         },
-        _ => "Default value (optional)".into(),
+        _ => t("cli.prompt.default_value"),
     }
 }
 
@@ -1472,15 +1644,17 @@ fn gather_validation_details(response: &Value) -> ValidationDetails {
             array
                 .iter()
                 .map(|error| {
+                    let unknown = t("cli.common.unknown");
+                    let failed = t("cli.validate.failed");
                     let path = error
                         .get("path")
                         .and_then(Value::as_str)
-                        .unwrap_or("<unknown>")
+                        .unwrap_or(unknown.as_str())
                         .to_string();
                     let message = error
                         .get("message")
                         .and_then(Value::as_str)
-                        .unwrap_or("validation failed")
+                        .unwrap_or(failed.as_str())
                         .to_string();
                     (path, message)
                 })
@@ -1521,7 +1695,7 @@ fn gather_validation_details(response: &Value) -> ValidationDetails {
 
 fn print_validation_errors(details: &ValidationDetails) -> CliResult<()> {
     if !details.errors.is_empty() {
-        eprintln!("Validation errors:");
+        eprintln!("{}", t("cli.validate.errors_header"));
         for (path, message) in &details.errors {
             eprintln!("  {}: {}", path, message);
         }
@@ -1529,15 +1703,21 @@ fn print_validation_errors(details: &ValidationDetails) -> CliResult<()> {
 
     if !details.missing_required.is_empty() {
         eprintln!(
-            "Missing required answers for: {}",
-            details.missing_required.join(", ")
+            "{}",
+            tf(
+                "cli.validate.missing_required",
+                &[("fields", details.missing_required.join(", "))]
+            )
         );
     }
 
     if !details.unknown_fields.is_empty() {
         eprintln!(
-            "Unknown answer fields: {}",
-            details.unknown_fields.join(", ")
+            "{}",
+            tf(
+                "cli.validate.unknown_fields",
+                &[("fields", details.unknown_fields.join(", "))]
+            )
         );
     }
 
@@ -1552,14 +1732,29 @@ fn print_render_output(
     match mode {
         RenderMode::Text => Ok(()),
         RenderMode::Card => {
-            println!("Adaptive card:\n{}", frontend_payload_json);
+            println!(
+                "{}",
+                tf(
+                    "cli.output.adaptive_card",
+                    &[("payload", frontend_payload_json.to_string())]
+                )
+            );
             Ok(())
         }
         RenderMode::Json => {
             if let Some(ui) = ui {
-                println!("JSON UI:\n{}", ui);
+                println!(
+                    "{}",
+                    tf("cli.output.json_ui", &[("payload", ui.to_string())])
+                );
             } else {
-                println!("JSON UI:\n{}", frontend_payload_json);
+                println!(
+                    "{}",
+                    tf(
+                        "cli.output.json_ui",
+                        &[("payload", frontend_payload_json.to_string())]
+                    )
+                );
             }
             Ok(())
         }
@@ -1571,13 +1766,13 @@ fn load_resolved_i18n_map(path: &Path) -> CliResult<ResolvedI18nMap> {
     let value: Value = serde_json::from_str(&raw)?;
     let object = value
         .as_object()
-        .ok_or("i18n-resolved must be a flat object map of string keys to string values.")?;
+        .ok_or_else(|| t("cli.i18n_resolved.flat_map_required"))?;
 
     let mut map = ResolvedI18nMap::new();
     for (key, value) in object {
         let text = value
             .as_str()
-            .ok_or("i18n-resolved must be a flat object map of string keys to string values.")?;
+            .ok_or_else(|| t("cli.i18n_resolved.flat_map_required"))?;
         map.insert(key.clone(), text.to_string());
     }
     Ok(map)

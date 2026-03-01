@@ -1,5 +1,6 @@
 use std::fmt::Write;
 
+use crate::{t, tf};
 use qa_spec::AnswerSet;
 use serde_json::Value;
 
@@ -46,11 +47,14 @@ impl WizardPresenter {
         if self.header_printed {
             return;
         }
-        println!("Form: {}", payload.form_title);
+        println!(
+            "{}",
+            tf("cli.wizard.form", &[("title", payload.form_title.clone())])
+        );
         if self.verbosity.is_verbose()
             && let Some(help) = &payload.help
         {
-            println!("Help: {}", help);
+            println!("{}", tf("cli.wizard.help", &[("help", help.clone())]));
         }
         self.header_printed = true;
     }
@@ -58,19 +62,24 @@ impl WizardPresenter {
     pub fn show_status(&self, payload: &WizardPayload) {
         if self.verbosity.is_verbose() {
             println!(
-                "Status: {} ({}/{})",
-                payload.status.as_str(),
-                payload.progress.answered,
-                payload.progress.total
+                "{}",
+                tf(
+                    "cli.wizard.status",
+                    &[
+                        ("status", payload.status.as_str().to_string()),
+                        ("answered", payload.progress.answered.to_string()),
+                        ("total", payload.progress.total.to_string()),
+                    ]
+                )
             );
             self.print_visible_questions(payload);
         } else if payload.status == RenderStatus::NeedInput && payload.visible_count() == 0 {
-            println!("No visible questions are available; check your conditional logic.");
+            println!("{}", t("cli.wizard.no_visible_questions"));
         }
     }
 
     fn print_visible_questions(&self, payload: &WizardPayload) {
-        println!("Visible questions:");
+        println!("{}", t("cli.wizard.visible_questions"));
         for question in payload.questions.iter().filter(|question| question.visible) {
             let mut entry = format!(" - {} ({})", question.id, question.title);
             if question.required {
@@ -98,35 +107,71 @@ impl WizardPresenter {
             println!("{}", description);
         }
         if !prompt.list_fields.is_empty() {
-            println!("List fields: {}", prompt.list_fields.join(", "));
+            println!(
+                "{}",
+                tf(
+                    "cli.wizard.list_fields",
+                    &[("fields", prompt.list_fields.join(", "))]
+                )
+            );
         }
         if self.verbosity.is_verbose() && !prompt.choices.is_empty() {
-            println!("Choices: {}", prompt.choices.join(", "));
+            println!(
+                "{}",
+                tf(
+                    "cli.wizard.choices",
+                    &[("choices", prompt.choices.join(", "))]
+                )
+            );
         }
     }
 
     pub fn show_parse_error(&self, error: &AnswerParseError) {
-        eprintln!("Invalid answer: {}", error.user_message);
+        eprintln!(
+            "{}",
+            tf(
+                "cli.wizard.invalid_answer",
+                &[("error", error.user_message.clone())]
+            )
+        );
         if let Some(debug) = &error.debug_message {
-            eprintln!("  Expected: {}", debug);
+            eprintln!(
+                "{}",
+                tf("cli.wizard.expected", &[("expected", debug.clone())])
+            );
         }
     }
 
     pub fn show_completion(&self, answer_set: &AnswerSet) {
-        println!("Done ✅");
+        println!("{}", t("cli.wizard.done"));
         match answer_set.to_cbor() {
             Ok(bytes) => {
-                println!("Answers (CBOR hex): {}", encode_hex(&bytes));
+                println!(
+                    "{}",
+                    tf("cli.wizard.answers_cbor", &[("hex", encode_hex(&bytes))])
+                );
             }
             Err(err) => {
-                eprintln!("Failed to serialize answers to CBOR: {}", err);
+                eprintln!(
+                    "{}",
+                    tf(
+                        "cli.wizard.cbor_serialize_failed",
+                        &[("error", err.to_string())]
+                    )
+                );
             }
         }
         if self.show_answers_json {
             match answer_set.to_json_pretty() {
                 Ok(pretty) => println!("{}", pretty),
                 Err(err) => {
-                    eprintln!("Failed to serialize answers to JSON: {}", err);
+                    eprintln!(
+                        "{}",
+                        tf(
+                            "cli.wizard.json_serialize_failed",
+                            &[("error", err.to_string())]
+                        )
+                    );
                 }
             }
         }
@@ -147,7 +192,7 @@ impl WizardPayload {
         let form_title = json
             .get("form_title")
             .and_then(Value::as_str)
-            .ok_or_else(|| "wizard payload missing form_title".to_string())?
+            .ok_or_else(|| t("cli.wizard.payload_missing_form_title"))?
             .to_string();
         let help = json
             .get("help")
@@ -161,7 +206,7 @@ impl WizardPayload {
         let progress = json
             .get("progress")
             .and_then(Value::as_object)
-            .ok_or_else(|| "wizard payload missing progress".to_string())?;
+            .ok_or_else(|| t("cli.wizard.payload_missing_progress"))?;
         let answered = progress
             .get("answered")
             .and_then(Value::as_u64)
@@ -170,7 +215,7 @@ impl WizardPayload {
         let questions = json
             .get("questions")
             .and_then(Value::as_array)
-            .ok_or_else(|| "wizard payload missing questions".to_string())?
+            .ok_or_else(|| t("cli.wizard.payload_missing_questions"))?
             .iter()
             .map(WizardQuestion::from_json)
             .collect::<Result<_, _>>()?;
@@ -244,12 +289,12 @@ impl WizardQuestion {
         let id = value
             .get("id")
             .and_then(Value::as_str)
-            .ok_or_else(|| "question missing id".to_string())?
+            .ok_or_else(|| t("cli.wizard.question_missing_id"))?
             .to_string();
         let title = value
             .get("title")
             .and_then(Value::as_str)
-            .ok_or_else(|| format!("question '{}' missing title", id))?
+            .ok_or_else(|| tf("cli.wizard.question_missing_title", &[("id", id.clone())]))?
             .to_string();
         let description = value
             .get("description")
@@ -362,11 +407,14 @@ impl QuestionKind {
 
     fn hint(&self, choices: &[String]) -> Option<String> {
         match self {
-            QuestionKind::Boolean => Some("(yes/no, y/n, true/false)".to_string()),
-            QuestionKind::Integer => Some("(integer)".to_string()),
-            QuestionKind::Number => Some("(number)".to_string()),
-            QuestionKind::Enum if !choices.is_empty() => Some(format!("({})", choices.join("/"))),
-            QuestionKind::List => Some("(repeatable list)".to_string()),
+            QuestionKind::Boolean => Some(t("cli.wizard.hint.boolean")),
+            QuestionKind::Integer => Some(t("cli.wizard.hint.integer")),
+            QuestionKind::Number => Some(t("cli.wizard.hint.number")),
+            QuestionKind::Enum if !choices.is_empty() => Some(tf(
+                "cli.wizard.hint.enum",
+                &[("choices", choices.join("/"))],
+            )),
+            QuestionKind::List => Some(t("cli.wizard.hint.list")),
             _ => None,
         }
     }

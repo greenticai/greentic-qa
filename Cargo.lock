@@ -177,7 +177,7 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
 name = "component-qa"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "qa-spec",
  "serde",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-qa"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "assert_cmd",
  "assert_fs",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-qa-lib"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "component-qa",
  "qa-spec",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "qa-spec"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "globset",
  "handlebars",
@@ -745,9 +745,9 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.8.9"
+version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
+checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rustix"

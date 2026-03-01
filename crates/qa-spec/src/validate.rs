@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::answers::{ValidationError, ValidationResult};
 use crate::computed::{apply_computed_answers, build_expression_context};
@@ -59,6 +60,7 @@ pub fn validate(spec: &FormSpec, answers: &Value) -> ValidationResult {
                 path,
                 message: validation.message.clone(),
                 code: validation.code.clone(),
+                params: BTreeMap::new(),
             });
         }
     }
@@ -76,8 +78,9 @@ fn validate_value(question: &QuestionSpec, value: &Value) -> Option<ValidationEr
         return Some(ValidationError {
             question_id: Some(question.id.clone()),
             path: Some(format!("/{}", question.id)),
-            message: "type mismatch".into(),
+            message: "qa_spec.type_mismatch".into(),
             code: Some("type_mismatch".into()),
+            params: BTreeMap::new(),
         });
     }
 
@@ -101,8 +104,9 @@ fn validate_value(question: &QuestionSpec, value: &Value) -> Option<ValidationEr
         return Some(ValidationError {
             question_id: Some(question.id.clone()),
             path: Some(format!("/{}", question.id)),
-            message: "invalid enum option".into(),
+            message: "qa_spec.enum_mismatch".into(),
             code: Some("enum_mismatch".into()),
+            params: BTreeMap::new(),
         });
     }
 
@@ -125,7 +129,7 @@ fn validate_list(question: &QuestionSpec, value: &Value) -> Option<ValidationErr
         None => {
             return Some(base_error(
                 question,
-                "list fields are not defined",
+                "qa_spec.missing_list_definition",
                 "missing_list_definition",
             ));
         }
@@ -144,7 +148,7 @@ fn validate_list(question: &QuestionSpec, value: &Value) -> Option<ValidationErr
             question,
             min_items,
             items.len(),
-            "not enough list entries",
+            "qa_spec.min_items",
             "min_items",
         ));
     }
@@ -156,7 +160,7 @@ fn validate_list(question: &QuestionSpec, value: &Value) -> Option<ValidationErr
             question,
             max_items,
             items.len(),
-            "too many list entries",
+            "qa_spec.max_items",
             "max_items",
         ));
     }
@@ -203,14 +207,18 @@ fn list_count_error(
     question: &QuestionSpec,
     threshold: usize,
     actual: usize,
-    message: &str,
+    message_key: &str,
     code: &str,
 ) -> ValidationError {
+    let mut params = BTreeMap::new();
+    params.insert("expected".into(), threshold.to_string());
+    params.insert("actual".into(), actual.to_string());
     ValidationError {
         question_id: Some(question.id.clone()),
         path: Some(format!("/{}", question.id)),
-        message: format!("{} (expected {}, got {})", message, threshold, actual),
+        message: message_key.into(),
         code: Some(code.into()),
+        params,
     }
 }
 
@@ -218,8 +226,9 @@ fn list_entry_type_error(question: &QuestionSpec, idx: usize) -> ValidationError
     ValidationError {
         question_id: Some(question.id.clone()),
         path: Some(format!("/{}/{}", question.id, idx)),
-        message: "list entry must be an object".into(),
+        message: "qa_spec.entry_type".into(),
         code: Some("entry_type".into()),
+        params: BTreeMap::new(),
     }
 }
 
@@ -227,8 +236,9 @@ fn list_not_array_error(question: &QuestionSpec) -> ValidationError {
     ValidationError {
         question_id: Some(question.id.clone()),
         path: Some(format!("/{}", question.id)),
-        message: "list value must be an array".into(),
+        message: "qa_spec.list_type".into(),
         code: Some("list_type".into()),
+        params: BTreeMap::new(),
     }
 }
 
@@ -237,11 +247,14 @@ fn list_field_missing_error(
     idx: usize,
     field_id: &str,
 ) -> ValidationError {
+    let mut params = BTreeMap::new();
+    params.insert("field".into(), field_id.to_string());
     ValidationError {
         question_id: Some(format!("{}[{}].{}", question.id, idx, field_id)),
         path: Some(format!("/{}/{}/{}", question.id, idx, field_id)),
-        message: format!("field '{}' is required", field_id),
+        message: "qa_spec.missing_field".into(),
         code: Some("missing_field".into()),
+        params,
     }
 }
 
@@ -257,7 +270,7 @@ fn enforce_constraint(
     {
         return Some(base_error(
             question,
-            "value does not match pattern",
+            "qa_spec.pattern_mismatch",
             "pattern_mismatch",
         ));
     }
@@ -266,36 +279,28 @@ fn enforce_constraint(
         && let Some(text) = value.as_str()
         && text.len() < min_len
     {
-        return Some(base_error(
-            question,
-            "string shorter than min length",
-            "min_length",
-        ));
+        return Some(base_error(question, "qa_spec.min_length", "min_length"));
     }
 
     if let Some(max_len) = constraint.max_len
         && let Some(text) = value.as_str()
         && text.len() > max_len
     {
-        return Some(base_error(
-            question,
-            "string longer than max length",
-            "max_length",
-        ));
+        return Some(base_error(question, "qa_spec.max_length", "max_length"));
     }
 
     if let Some(min) = constraint.min
         && let Some(value) = value.as_f64()
         && value < min
     {
-        return Some(base_error(question, "value below minimum", "min"));
+        return Some(base_error(question, "qa_spec.min", "min"));
     }
 
     if let Some(max) = constraint.max
         && let Some(value) = value.as_f64()
         && value > max
     {
-        return Some(base_error(question, "value above maximum", "max"));
+        return Some(base_error(question, "qa_spec.max", "max"));
     }
 
     None
@@ -307,5 +312,6 @@ fn base_error(question: &QuestionSpec, message: &str, code: &str) -> ValidationE
         path: Some(format!("/{}", question.id)),
         message: message.into(),
         code: Some(code.into()),
+        params: BTreeMap::new(),
     }
 }
